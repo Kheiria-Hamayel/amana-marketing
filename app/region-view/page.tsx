@@ -3,7 +3,6 @@
 import React, { useState, useEffect, useRef } from "react";
 // Replicating imports you would use for icons
 import { AreaChart, DollarSign, Map, TrendingUp } from "lucide-react";
-
 import { Navbar } from "../../src/components/ui/navbar";
 import { Footer } from "../../src/components/ui/footer";
 
@@ -25,7 +24,8 @@ interface LeafletBubbleMapProps {
 interface L_Layer {
   remove(): void;
   bindPopup(content: string): L_Layer;
-  addTo(map: L_Map): L_Layer;
+  addTo(map: L_Map | L_Layer): L_Layer; // Update addTo signature to accept L_Layer (LayerGroup)
+  clearLayers?(): void; // Add clearLayers for LayerGroup reference
 }
 
 interface L_Map {
@@ -43,6 +43,7 @@ interface L_Static {
   CircleMarker: {
     new (latLng: [number, number], options?: any): L_Layer;
   };
+  layerGroup(layers?: L_Layer[]): L_Layer & { clearLayers(): void }; // Add LayerGroup factory
 }
 
 declare global {
@@ -114,9 +115,13 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L_Map | null>(null);
+  // Ref to store the layer group for markers, enabling easy clearing
+  const markerGroupRef = useRef<L_Layer | null>(null);
+
   const [isLeafletLoaded, setIsLeafletLoaded] = useState(false);
   const isRevenue = valueKey === "revenue";
 
+  // Define setupMap inside the component scope but outside of useEffect to be callable
   const setupMap = () => {
     if (
       typeof window.L === "undefined" ||
@@ -149,6 +154,12 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
         }
       ).addTo(map);
 
+      // Initialize marker layer group
+      const markerGroup = L.layerGroup();
+      markerGroup.addTo(map);
+      markerGroupRef.current = markerGroup;
+
+      // Invalidate size ensures the map is drawn correctly after React renders
       setTimeout(() => map.invalidateSize(), 0);
 
       setIsLeafletLoaded(true);
@@ -162,6 +173,9 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
     const leafletCssUrl = "https://unpkg.com/leaflet/dist/leaflet.css";
     const leafletJsUrl = "https://unpkg.com/leaflet/dist/leaflet.js";
 
+    // Safety check: ensure the container is mounted before proceeding
+    if (!mapContainerRef.current) return;
+
     // Inject CSS
     if (!document.querySelector(`link[href="${leafletCssUrl}"]`)) {
       const link = document.createElement("link");
@@ -174,13 +188,16 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
     if (typeof window.L === "undefined") {
       const script = document.createElement("script");
       script.src = leafletJsUrl;
+      // Set up map once script is loaded
       script.onload = setupMap;
       document.body.appendChild(script);
     } else {
-      setupMap();
+      // FIX: If L is already defined, defer the map setup to the next tick
+      // (using setTimeout(..., 0)) to exit the current hydration/render cycle safely.
+      setTimeout(setupMap, 0);
     }
 
-    // Cleanup
+    // Cleanup: Remove map instance
     return () => {
       if (mapInstanceRef.current) {
         mapInstanceRef.current.remove();
@@ -191,31 +208,36 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
 
   // 2. Data Plotting and Metric Update Effect
   useEffect(() => {
+    // Check for markerGroupRef.current which holds the LayerGroup
     if (
       !isLeafletLoaded ||
       !mapInstanceRef.current ||
-      typeof window.L === "undefined"
+      typeof window.L === "undefined" ||
+      !markerGroupRef.current
     )
       return;
 
-    const map = mapInstanceRef.current;
     const L = window.L;
+    const markerGroup = markerGroupRef.current;
 
-    // Clear existing markers
-    map.eachLayer((layer) => {
-      // Only remove circle markers
-      if (L.CircleMarker && layer instanceof L.CircleMarker) {
-        map.removeLayer(layer);
-      }
-    });
+    // Clear existing markers from the LayerGroup before adding new ones
+    // This ensures the size update takes effect immediately
+    (markerGroup as L_Layer & { clearLayers(): void }).clearLayers();
 
     const numericData: number[] = data.map((d) => d[valueKey]);
     const maxValue = Math.max(...numericData);
     const colorHex = isRevenue ? "#10B981" : "#EF4444"; // Green or Red for Revenue/Spend
 
     data.forEach((item) => {
-      // Calculate radius dynamically (min 5, max 30)
-      const radius = Math.max(5, Math.round((item[valueKey] / maxValue) * 30));
+      // --- Use constants for radius calculation ---
+      const maxRadius = 50;
+      const minRadius = 8;
+      // Calculate radius dynamically (min 8, max 50)
+      const radius = Math.max(
+        minRadius,
+        Math.round((item[valueKey] / maxValue) * maxRadius)
+      );
+      // ------------------------------------------
 
       const popupContent = `
         <div class="font-sans text-gray-900 p-1">
@@ -234,14 +256,15 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
         weight: 1.5,
       })
         .bindPopup(popupContent)
-        .addTo(map);
+        // Add marker to the LayerGroup
+        .addTo(markerGroup);
     });
   }, [data, valueKey, isRevenue, isLeafletLoaded]);
 
   return (
     <div className="p-4 bg-gray-800 rounded-xl shadow-2xl h-full flex flex-col">
       <h2 className="text-xl font-semibold mb-6 text-white flex items-center">
-        <Map className="w-5 h-5 mr-2 text-blue-400" />
+        <Map className="w-5 h-5 mr-2 text-purple-400" />
         Interactive Regional Performance: {isRevenue ? "Revenue" : "Spend"}
       </h2>
       <div
@@ -283,6 +306,13 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
 // --- MAIN PAGE COMPONENT ---
 export default function RegionView() {
   const [metric, setMetric] = useState<"revenue" | "spend">("revenue");
+  // State to track if the component has mounted on the client side
+  const [hasMounted, setHasMounted] = useState(false);
+
+  // Use effect to set hasMounted to true after the first client-side render
+  useEffect(() => {
+    setHasMounted(true);
+  }, []);
 
   const handleMetricChange = (newMetric: "revenue" | "spend") => {
     setMetric(newMetric);
@@ -300,7 +330,7 @@ export default function RegionView() {
           <div className="px-6 lg:px-8 max-w-7xl mx-auto w-full">
             <div className="text-center">
               <h1 className="text-3xl md:text-5xl font-bold">
-                Weekly Performance View
+                Region <span className="text-purple-400">View</span>
               </h1>
             </div>
           </div>
@@ -339,14 +369,24 @@ export default function RegionView() {
           {/* Visualization Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 h-[600px] w-full">
-              <LeafletBubbleMap data={MOCK_REGIONAL_DATA} valueKey={metric} />
+              {/* Conditionally render the map only after client-side mount */}
+              {hasMounted ? (
+                <LeafletBubbleMap data={MOCK_REGIONAL_DATA} valueKey={metric} />
+              ) : (
+                <div
+                  className="p-4 bg-gray-800 rounded-xl shadow-2xl h-full flex flex-col justify-center items-center"
+                  style={{ minHeight: "500px" }}
+                >
+                  <p className="text-white">Initializing map...</p>
+                </div>
+              )}
             </div>
 
             {/* Quick Stats Panel */}
             <div className="lg:col-span-1">
               <div className="bg-gray-800 p-6 rounded-xl shadow-2xl h-full border border-gray-700">
                 <h2 className="text-xl font-semibold text-white mb-6 flex items-center">
-                  <AreaChart className="w-6 h-6 mr-2 text-blue-400" />
+                  <AreaChart className="w-6 h-6 mr-2 text-purple-400" />
                   Regional Summary
                 </h2>
 
