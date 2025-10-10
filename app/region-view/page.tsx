@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 // Replicating imports you would use for icons
 import { AreaChart, DollarSign, Map, TrendingUp } from "lucide-react";
 import { Navbar } from "../../src/components/ui/navbar";
@@ -113,67 +113,107 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
   data,
   valueKey,
 }) => {
+  // FIX: Initializing ref with null instead of itself
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L_Map | null>(null);
-  // Ref to store the layer group for markers, enabling easy clearing
   const markerGroupRef = useRef<L_Layer | null>(null);
+  const isInitializingRef = useRef(false);
 
   const [isLeafletLoaded, setIsLeafletLoaded] = useState(false);
   const isRevenue = valueKey === "revenue";
 
-  // Define setupMap inside the component scope but outside of useEffect to be callable
-  const setupMap = () => {
+  /**
+   * Initializes the Leaflet map only if it hasn't been done already AND the container is ready.
+   * Uses requestAnimationFrame to ensure container dimensions are non-zero.
+   */
+  const setupMap = useCallback(() => {
+    const L = window.L; // Local variable to help TypeScript narrow the type
+
+    // 1. Check if L is available, container is mounted, and prevent redundant calls
     if (
-      typeof window.L === "undefined" ||
+      typeof L === "undefined" ||
       !mapContainerRef.current ||
-      mapInstanceRef.current
+      mapInstanceRef.current ||
+      isInitializingRef.current
     )
       return;
 
-    try {
-      const L = window.L;
+    // Set flag to true to prevent other calls from entering while initialization is running
+    isInitializingRef.current = true;
 
-      const map = L.map(mapContainerRef.current, {
-        center: [25.0, 48.0], // Center around GCC
-        zoom: 5,
-        minZoom: 4,
-        maxZoom: 10,
-        zoomControl: true,
-        scrollWheelZoom: true,
-      });
+    const container = mapContainerRef.current;
 
-      mapInstanceRef.current = map;
+    const checkSizeAndInit = () => {
+      // CRITICAL CHECK: Check if L is still available inside the async loop
+      if (typeof window.L === "undefined") {
+        isInitializingRef.current = false; // Stop initialization
+        return;
+      }
 
-      // Add Tile Layer (Dark Mode friendly map style)
-      L.tileLayer(
-        "https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png",
-        {
-          attribution:
-            '&copy; <a href="https://stadiamaps.com/">Stadia Maps</a>, &copy; <a href="https://openmaptiles.org/">OpenMapTiles</a> &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors',
-          maxZoom: 20,
+      // Check if the container has been rendered with actual width/height
+      if (container.offsetWidth === 0 || container.offsetHeight === 0) {
+        // If not ready, try again on the next animation frame
+        requestAnimationFrame(checkSizeAndInit);
+        return;
+      }
+
+      try {
+        // We can safely use L here because of the initial checks
+        const L = window.L as L_Static;
+
+        // CRITICAL CHECK: Check one last time before initialization
+        if (mapInstanceRef.current) {
+          isInitializingRef.current = false; // Reset flag if another process initialized it
+          return;
         }
-      ).addTo(map);
 
-      // Initialize marker layer group
-      const markerGroup = L.layerGroup();
-      markerGroup.addTo(map);
-      markerGroupRef.current = markerGroup;
+        const map = L.map(container, {
+          center: [25.0, 48.0], // Center around GCC
+          zoom: 5,
+          minZoom: 4,
+          maxZoom: 10,
+          zoomControl: true,
+          scrollWheelZoom: true,
+        });
 
-      // Invalidate size ensures the map is drawn correctly after React renders
-      setTimeout(() => map.invalidateSize(), 0);
+        mapInstanceRef.current = map;
 
-      setIsLeafletLoaded(true);
-    } catch (error) {
-      console.error("Error initializing Leaflet map:", error);
-    }
-  };
+        // Using CartoDB Dark Matter tiles which do not require an API key
+        L.tileLayer(
+          "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+          {
+            attribution:
+              '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+            maxZoom: 20,
+          }
+        ).addTo(map);
+
+        // Initialize marker layer group
+        const markerGroup = L.layerGroup();
+        markerGroup.addTo(map);
+        markerGroupRef.current = markerGroup;
+
+        // Invalidate size guarantees the map calculates its view correctly
+        map.invalidateSize();
+
+        setIsLeafletLoaded(true);
+      } catch (error) {
+        console.error("Error initializing Leaflet map:", error);
+      } finally {
+        // Ensure flag is reset after initialization attempt (success or failure)
+        isInitializingRef.current = false;
+      }
+    };
+
+    // Start the size checking process on the next animation frame
+    requestAnimationFrame(checkSizeAndInit);
+  }, []); // Empty dependency array ensures a stable function reference
 
   // 1. Dynamic Leaflet Loading and CSS Injection
   useEffect(() => {
     const leafletCssUrl = "https://unpkg.com/leaflet/dist/leaflet.css";
     const leafletJsUrl = "https://unpkg.com/leaflet/dist/leaflet.js";
 
-    // Safety check: ensure the container is mounted before proceeding
     if (!mapContainerRef.current) return;
 
     // Inject CSS
@@ -192,9 +232,8 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
       script.onload = setupMap;
       document.body.appendChild(script);
     } else {
-      // FIX: If L is already defined, defer the map setup to the next tick
-      // (using setTimeout(..., 0)) to exit the current hydration/render cycle safely.
-      setTimeout(setupMap, 0);
+      // If L is already defined, run setup immediately (safeguarded by checks inside setupMap)
+      setupMap();
     }
 
     // Cleanup: Remove map instance
@@ -202,26 +241,28 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
       if (mapInstanceRef.current) {
         mapInstanceRef.current.remove();
         mapInstanceRef.current = null;
+        isInitializingRef.current = false;
+        setIsLeafletLoaded(false);
       }
     };
-  }, []);
+  }, [setupMap]);
 
   // 2. Data Plotting and Metric Update Effect
   useEffect(() => {
-    // Check for markerGroupRef.current which holds the LayerGroup
+    const L = window.L; // Local constant for type-safe use
+
+    // Only proceed if map is loaded and L is available, and other refs exist
     if (
       !isLeafletLoaded ||
       !mapInstanceRef.current ||
-      typeof window.L === "undefined" ||
+      typeof L === "undefined" ||
       !markerGroupRef.current
     )
       return;
 
-    const L = window.L;
     const markerGroup = markerGroupRef.current;
 
-    // Clear existing markers from the LayerGroup before adding new ones
-    // This ensures the size update takes effect immediately
+    // Clear existing markers from the LayerGroup
     (markerGroup as L_Layer & { clearLayers(): void }).clearLayers();
 
     const numericData: number[] = data.map((d) => d[valueKey]);
@@ -242,12 +283,13 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
       const popupContent = `
         <div class="font-sans text-gray-900 p-1">
             <strong style="color: ${colorHex};">${item.region}</strong><br/>
-            ${isRevenue ? "Revenue" : "Spend"}: $${item[
+            ${isRevenue ? "Revenue:" : "Spend:"} $${item[
         valueKey
       ].toLocaleString()}
         </div>
       `;
 
+      // Use L safely here
       L.circleMarker([item.lat, item.lng], {
         radius: radius,
         color: colorHex,
@@ -264,7 +306,7 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
   return (
     <div className="p-4 bg-gray-800 rounded-xl shadow-2xl h-full flex flex-col">
       <h2 className="text-xl font-semibold mb-6 text-white flex items-center">
-        <Map className="w-5 h-5 mr-2 text-purple-400" />
+        <Map className="w-5 h-5 mr-2 text-blue-400" />
         Interactive Regional Performance: {isRevenue ? "Revenue" : "Spend"}
       </h2>
       <div
@@ -329,9 +371,7 @@ export default function RegionView() {
         <section className="bg-gradient-to-r from-gray-800 to-gray-700 text-white py-12">
           <div className="px-6 lg:px-8 max-w-7xl mx-auto w-full">
             <div className="text-center">
-              <h1 className="text-3xl md:text-5xl font-bold">
-                Region <span className="text-purple-400">View</span>
-              </h1>
+              <h1 className="text-3xl md:text-5xl font-bold">Region View</h1>
             </div>
           </div>
         </section>
@@ -386,7 +426,7 @@ export default function RegionView() {
             <div className="lg:col-span-1">
               <div className="bg-gray-800 p-6 rounded-xl shadow-2xl h-full border border-gray-700">
                 <h2 className="text-xl font-semibold text-white mb-6 flex items-center">
-                  <AreaChart className="w-6 h-6 mr-2 text-purple-400" />
+                  <AreaChart className="w-6 h-6 mr-2 text-blue-400" />
                   Regional Summary
                 </h2>
 
