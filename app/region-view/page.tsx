@@ -113,7 +113,6 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
   data,
   valueKey,
 }) => {
-  // FIX: Initializing ref with null instead of itself
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L_Map | null>(null);
   const markerGroupRef = useRef<L_Layer | null>(null);
@@ -127,7 +126,10 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
    * Uses requestAnimationFrame to ensure container dimensions are non-zero.
    */
   const setupMap = useCallback(() => {
-    const L = window.L; // Local variable to help TypeScript narrow the type
+    // CRITICAL SSR SAFETY CHECK: If running on server, exit immediately.
+    if (typeof window === "undefined") return;
+
+    const L = window.L; // Local variable for type safety
 
     // 1. Check if L is available, container is mounted, and prevent redundant calls
     if (
@@ -211,6 +213,9 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
 
   // 1. Dynamic Leaflet Loading and CSS Injection
   useEffect(() => {
+    // CRITICAL SSR SAFETY CHECK: If running on server, exit immediately.
+    if (typeof window === "undefined") return;
+
     const leafletCssUrl = "https://unpkg.com/leaflet/dist/leaflet.css";
     const leafletJsUrl = "https://unpkg.com/leaflet/dist/leaflet.js";
 
@@ -249,6 +254,9 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
 
   // 2. Data Plotting and Metric Update Effect
   useEffect(() => {
+    // CRITICAL SSR SAFETY CHECK: If running on server, exit immediately.
+    if (typeof window === "undefined") return;
+
     const L = window.L; // Local constant for type-safe use
 
     // Only proceed if map is loaded and L is available, and other refs exist
@@ -318,7 +326,7 @@ const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
         {!isLeafletLoaded && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-900/90 text-white z-10 p-4">
             <svg
-              className="animate-spin -ml-1 mr-3 h-8 w-8 text-purple-400"
+              className="animate-spin -ml-1 mr-3 h-8 w-8 text-blue-400"
               xmlns="http://www.w3.org/2000/svg"
               fill="none"
               viewBox="0 0 24 24"
