@@ -1,331 +1,384 @@
 "use client";
-import { useState, useEffect, useMemo } from "react";
+
+import React, { useState, useEffect, useRef } from "react";
+// Replicating imports you would use for icons
+import { AreaChart, DollarSign, Map, TrendingUp } from "lucide-react";
+
 import { Navbar } from "../../src/components/ui/navbar";
 import { Footer } from "../../src/components/ui/footer";
-import { CardMetric } from "../../src/components/ui/card-metric";
-import { BubbleMap } from "../../src/components/ui/bubble-map";
-import { Table } from "../../src/components/ui/table";
-import { fetchMarketingData } from "../../src/lib/api";
-import { MarketingData, RegionalPerformance } from "../../src/types/marketing";
-import {
-  DollarSign,
-  TrendingUp,
-  MapPin,
-  Users,
-  Target,
-  BarChart3,
-} from "lucide-react";
 
-export default function RegionView() {
-  const [marketingData, setMarketingData] = useState<MarketingData | null>(
-    null
-  );
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+// --- TYPESCRIPT INTERFACE DEFINITION ---
+interface RegionalDataPoint {
+  region: string;
+  revenue: number;
+  spend: number;
+  lat: number;
+  lng: number;
+}
 
-  // Load data on component mount
+interface LeafletBubbleMapProps {
+  data: RegionalDataPoint[];
+  valueKey: "revenue" | "spend";
+}
+
+// --- LEAFLET TYPESCRIPT AUGMENTATION (to allow use of window.L) ---
+interface L_Layer {
+  remove(): void;
+  bindPopup(content: string): L_Layer;
+  addTo(map: L_Map): L_Layer;
+}
+
+interface L_Map {
+  remove(): void;
+  eachLayer(callback: (layer: any) => void): void;
+  removeLayer(layer: any): void;
+  invalidateSize(): void;
+  setView(latLng: [number, number], zoom: number): L_Map;
+}
+
+interface L_Static {
+  map(container: string | HTMLElement, options?: any): L_Map;
+  tileLayer(url: string, options?: any): L_Layer;
+  circleMarker(latLng: [number, number], options?: any): L_Layer;
+  CircleMarker: {
+    new (latLng: [number, number], options?: any): L_Layer;
+  };
+}
+
+declare global {
+  interface Window {
+    L?: L_Static;
+  }
+}
+// --- END LEAFLET TYPESCRIPT AUGMENTATION ---
+
+// --- MOCK DATA ---
+const MOCK_REGIONAL_DATA: RegionalDataPoint[] = [
+  {
+    region: "Kuwait City",
+    revenue: 550000,
+    spend: 22000,
+    lat: 29.3759,
+    lng: 47.9774,
+  },
+  {
+    region: "Sharjah",
+    revenue: 380000,
+    spend: 15000,
+    lat: 25.3528,
+    lng: 55.4052,
+  },
+  {
+    region: "Dubai",
+    revenue: 850000,
+    spend: 35000,
+    lat: 25.2048,
+    lng: 55.2708,
+  },
+  {
+    region: "Abu Dhabi",
+    revenue: 600000,
+    spend: 25000,
+    lat: 24.4539,
+    lng: 54.3773,
+  },
+  {
+    region: "Riyadh",
+    revenue: 450000,
+    spend: 18000,
+    lat: 24.7136,
+    lng: 46.6753,
+  },
+  {
+    region: "Manama",
+    revenue: 220000,
+    spend: 10000,
+    lat: 26.2285,
+    lng: 50.586,
+  },
+  { region: "Doha", revenue: 400000, spend: 16000, lat: 25.2854, lng: 51.531 },
+  {
+    region: "Jeddah",
+    revenue: 320000,
+    spend: 13000,
+    lat: 21.4858,
+    lng: 39.1925,
+  },
+];
+
+// --- Leaflet Map Component ---
+
+const LeafletBubbleMap: React.FC<LeafletBubbleMapProps> = ({
+  data,
+  valueKey,
+}) => {
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const mapInstanceRef = useRef<L_Map | null>(null);
+  const [isLeafletLoaded, setIsLeafletLoaded] = useState(false);
+  const isRevenue = valueKey === "revenue";
+
+  const setupMap = () => {
+    if (
+      typeof window.L === "undefined" ||
+      !mapContainerRef.current ||
+      mapInstanceRef.current
+    )
+      return;
+
+    try {
+      const L = window.L;
+
+      const map = L.map(mapContainerRef.current, {
+        center: [25.0, 48.0], // Center around GCC
+        zoom: 5,
+        minZoom: 4,
+        maxZoom: 10,
+        zoomControl: true,
+        scrollWheelZoom: true,
+      });
+
+      mapInstanceRef.current = map;
+
+      // Add Tile Layer (Dark Mode friendly map style)
+      L.tileLayer(
+        "https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png",
+        {
+          attribution:
+            '&copy; <a href="https://stadiamaps.com/">Stadia Maps</a>, &copy; <a href="https://openmaptiles.org/">OpenMapTiles</a> &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors',
+          maxZoom: 20,
+        }
+      ).addTo(map);
+
+      setTimeout(() => map.invalidateSize(), 0);
+
+      setIsLeafletLoaded(true);
+    } catch (error) {
+      console.error("Error initializing Leaflet map:", error);
+    }
+  };
+
+  // 1. Dynamic Leaflet Loading and CSS Injection
   useEffect(() => {
-    const loadData = async () => {
-      try {
-        const data = await fetchMarketingData();
-        setMarketingData(data);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load data");
-        console.error("Error loading marketing data:", err);
-      } finally {
-        setLoading(false);
+    const leafletCssUrl = "https://unpkg.com/leaflet/dist/leaflet.css";
+    const leafletJsUrl = "https://unpkg.com/leaflet/dist/leaflet.js";
+
+    // Inject CSS
+    if (!document.querySelector(`link[href="${leafletCssUrl}"]`)) {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = leafletCssUrl;
+      document.head.appendChild(link);
+    }
+
+    // Inject JS
+    if (typeof window.L === "undefined") {
+      const script = document.createElement("script");
+      script.src = leafletJsUrl;
+      script.onload = setupMap;
+      document.body.appendChild(script);
+    } else {
+      setupMap();
+    }
+
+    // Cleanup
+    return () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
       }
     };
-
-    loadData();
   }, []);
 
-  // Aggregate regional performance data from all campaigns
-  const regionalData = useMemo(() => {
-    if (!marketingData?.campaigns) return [];
+  // 2. Data Plotting and Metric Update Effect
+  useEffect(() => {
+    if (
+      !isLeafletLoaded ||
+      !mapInstanceRef.current ||
+      typeof window.L === "undefined"
+    )
+      return;
 
-    const regionMap = new Map();
+    const map = mapInstanceRef.current;
+    const L = window.L;
 
-    marketingData.campaigns.forEach((campaign) => {
-      campaign.regional_performance.forEach((region) => {
-        const key = `${region.region}-${region.country}`;
-        if (!regionMap.has(key)) {
-          regionMap.set(key, {
-            region: region.region,
-            country: region.country,
-            impressions: 0,
-            clicks: 0,
-            conversions: 0,
-            spend: 0,
-            revenue: 0,
-            ctr: 0,
-            conversion_rate: 0,
-            cpc: 0,
-            cpa: 0,
-            roas: 0,
-            campaignCount: 0,
-          });
-        }
-
-        const existing = regionMap.get(key);
-        existing.impressions += region.impressions;
-        existing.clicks += region.clicks;
-        existing.conversions += region.conversions;
-        existing.spend += region.spend;
-        existing.revenue += region.revenue;
-        existing.campaignCount += 1;
-      });
+    // Clear existing markers
+    map.eachLayer((layer) => {
+      // Only remove circle markers
+      if (L.CircleMarker && layer instanceof L.CircleMarker) {
+        map.removeLayer(layer);
+      }
     });
 
-    // Calculate averages and final metrics
-    return Array.from(regionMap.values()).map((region) => ({
-      ...region,
-      ctr:
-        region.impressions > 0 ? (region.clicks / region.impressions) * 100 : 0,
-      conversion_rate:
-        region.clicks > 0 ? (region.conversions / region.clicks) * 100 : 0,
-      cpc: region.clicks > 0 ? region.spend / region.clicks : 0,
-      cpa: region.conversions > 0 ? region.spend / region.conversions : 0,
-      roas: region.spend > 0 ? region.revenue / region.spend : 0,
-    }));
-  }, [marketingData?.campaigns]);
+    const numericData: number[] = data.map((d) => d[valueKey]);
+    const maxValue = Math.max(...numericData);
+    const colorHex = isRevenue ? "#10B981" : "#EF4444"; // Green or Red for Revenue/Spend
 
-  // Calculate regional metrics for cards
-  const regionalMetrics = useMemo(() => {
-    if (regionalData.length === 0) return null;
+    data.forEach((item) => {
+      // Calculate radius dynamically (min 5, max 30)
+      const radius = Math.max(5, Math.round((item[valueKey] / maxValue) * 30));
 
-    const totalRevenue = regionalData.reduce(
-      (sum, region) => sum + region.revenue,
-      0
-    );
-    const totalSpend = regionalData.reduce(
-      (sum, region) => sum + region.spend,
-      0
-    );
-    const totalConversions = regionalData.reduce(
-      (sum, region) => sum + region.conversions,
-      0
-    );
-
-    // Find top performing region by ROAS
-    const topRegion = regionalData.reduce(
-      (top, region) => (region.roas > top.roas ? region : top),
-      regionalData[0]
-    );
-
-    // Find region with highest revenue
-    const highestRevenueRegion = regionalData.reduce(
-      (top, region) => (region.revenue > top.revenue ? region : top),
-      regionalData[0]
-    );
-
-    return {
-      totalRevenue,
-      totalSpend,
-      totalConversions,
-      averageROAS: totalSpend > 0 ? totalRevenue / totalSpend : 0,
-      topRegion: topRegion.region,
-      topRegionROAS: topRegion.roas,
-      highestRevenueRegion: highestRevenueRegion.region,
-      highestRevenue: highestRevenueRegion.revenue,
-      regionCount: regionalData.length,
-    };
-  }, [regionalData]);
-
-  if (loading) {
-    return (
-      <div className="flex h-screen bg-gray-900">
-        <Navbar />
-        <div className="flex-1 flex items-center justify-center">
-          <div className="text-white">Loading regional data...</div>
+      const popupContent = `
+        <div class="font-sans text-gray-900 p-1">
+            <strong style="color: ${colorHex};">${item.region}</strong><br/>
+            ${isRevenue ? "Revenue" : "Spend"}: $${item[
+        valueKey
+      ].toLocaleString()}
         </div>
-      </div>
-    );
-  }
+      `;
+
+      L.circleMarker([item.lat, item.lng], {
+        radius: radius,
+        color: colorHex,
+        fillColor: colorHex,
+        fillOpacity: 0.85,
+        weight: 1.5,
+      })
+        .bindPopup(popupContent)
+        .addTo(map);
+    });
+  }, [data, valueKey, isRevenue, isLeafletLoaded]);
 
   return (
-    <div className="flex flex-col lg:flex-row min-h-screen bg-gray-900">
+    <div className="p-4 bg-gray-800 rounded-xl shadow-2xl h-full flex flex-col">
+      <h2 className="text-xl font-semibold mb-6 text-white flex items-center">
+        <Map className="w-5 h-5 mr-2 text-blue-400" />
+        Interactive Regional Performance: {isRevenue ? "Revenue" : "Spend"}
+      </h2>
+      <div
+        ref={mapContainerRef}
+        className="relative flex-1 rounded-lg border border-gray-700 bg-gray-900/50 overflow-hidden"
+        style={{ height: "100%", minHeight: "500px", width: "100%" }}
+      >
+        {/* Simple Loading Indicator */}
+        {!isLeafletLoaded && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-900/90 text-white z-10 p-4">
+            <svg
+              className="animate-spin -ml-1 mr-3 h-8 w-8 text-purple-400"
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+            >
+              <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+              ></circle>
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+              ></path>
+            </svg>
+            <p className="mt-3 text-sm">Loading Interactive Map...</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// --- MAIN PAGE COMPONENT ---
+export default function RegionView() {
+  const [metric, setMetric] = useState<"revenue" | "spend">("revenue");
+
+  const handleMetricChange = (newMetric: "revenue" | "spend") => {
+    setMetric(newMetric);
+  };
+
+  return (
+    // This top-level flex container correctly establishes the side-bar layout
+    <div className="flex h-screen bg-gray-900">
       <Navbar />
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col transition-all duration-300 ease-in-out overflow-hidden">
-        {/* Hero Section */}
-        <section className="bg-gradient-to-r from-gray-800 to-gray-700 text-white py-8 sm:py-12">
-          <div className="px-4 sm:px-6 lg:px-8">
+      {/* Main Content Area: Takes remaining width and allows scrolling (overflow-y-auto) */}
+      <div className="flex-1 flex flex-col transition-all duration-300 ease-in-out overflow-y-auto">
+        {/* Hero Section - Using the exact structure from your starter code */}
+        <section className="bg-gradient-to-r from-gray-800 to-gray-700 text-white py-12">
+          <div className="px-6 lg:px-8 max-w-7xl mx-auto w-full">
             <div className="text-center">
-              {error ? (
-                <div className="bg-red-900 border border-red-700 text-red-200 px-3 sm:px-4 py-3 rounded mb-4 max-w-2xl mx-auto text-sm sm:text-base">
-                  Error loading data: {error}
-                </div>
-              ) : (
-                <h1 className="text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-bold">
-                  Regional Performance
-                </h1>
-              )}
+              <h1 className="text-3xl md:text-5xl font-bold">
+                Weekly Performance View
+              </h1>
             </div>
           </div>
         </section>
 
-        {/* Content Area */}
-        <div className="flex-1 p-3 sm:p-4 lg:p-6 overflow-y-auto w-full max-w-full">
-          {marketingData && regionalMetrics && (
-            <>
-              {/* Regional Overview Metrics */}
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6 sm:mb-8">
-                <CardMetric
-                  title="Total Regions"
-                  value={regionalMetrics.regionCount}
-                  icon={<MapPin className="h-5 w-5" />}
-                />
+        {/* Content Area - Using the exact structure from your starter code */}
+        <div className="flex-1 p-4 lg:p-6 max-w-7xl mx-auto w-full">
+          {/* Metric Controls */}
+          <div className="flex justify-center mb-8">
+            <div className="inline-flex rounded-xl bg-gray-800 p-1 shadow-lg border border-gray-700">
+              <button
+                onClick={() => handleMetricChange("revenue")}
+                className={`flex items-center px-4 py-2 text-sm font-medium rounded-lg transition-colors duration-200 ${
+                  metric === "revenue"
+                    ? "bg-green-600 text-white shadow-md"
+                    : "text-gray-300 hover:bg-gray-700 hover:text-white"
+                }`}
+              >
+                <TrendingUp className="w-4 h-4 mr-2" />
+                View Revenue
+              </button>
+              <button
+                onClick={() => handleMetricChange("spend")}
+                className={`flex items-center px-4 py-2 text-sm font-medium rounded-lg transition-colors duration-200 ${
+                  metric === "spend"
+                    ? "bg-red-600 text-white shadow-md"
+                    : "text-gray-300 hover:bg-gray-700 hover:text-white"
+                }`}
+              >
+                <DollarSign className="w-4 h-4 mr-2" />
+                View Spend
+              </button>
+            </div>
+          </div>
 
-                <CardMetric
-                  title="Total Revenue"
-                  value={`$${regionalMetrics.totalRevenue.toLocaleString()}`}
-                  icon={<DollarSign className="h-5 w-5" />}
-                />
+          {/* Visualization Grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 h-[600px] w-full">
+              <LeafletBubbleMap data={MOCK_REGIONAL_DATA} valueKey={metric} />
+            </div>
 
-                <CardMetric
-                  title="Total Spend"
-                  value={`$${regionalMetrics.totalSpend.toLocaleString()}`}
-                  icon={<TrendingUp className="h-5 w-5" />}
-                />
+            {/* Quick Stats Panel */}
+            <div className="lg:col-span-1">
+              <div className="bg-gray-800 p-6 rounded-xl shadow-2xl h-full border border-gray-700">
+                <h2 className="text-xl font-semibold text-white mb-6 flex items-center">
+                  <AreaChart className="w-6 h-6 mr-2 text-blue-400" />
+                  Regional Summary
+                </h2>
 
-                <CardMetric
-                  title="Avg ROAS"
-                  value={`${regionalMetrics.averageROAS.toFixed(1)}x`}
-                  icon={<BarChart3 className="h-5 w-5" />}
-                />
-              </div>
-
-              {/* Regional Highlights */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mb-6 sm:mb-8">
-                <CardMetric
-                  title="Top Performing Region (ROAS)"
-                  value={regionalMetrics.topRegion}
-                  subtitle={`${regionalMetrics.topRegionROAS.toFixed(1)}x ROAS`}
-                  icon={<Target className="h-5 w-5" />}
-                />
-
-                <CardMetric
-                  title="Highest Revenue Region"
-                  value={regionalMetrics.highestRevenueRegion}
-                  subtitle={`$${regionalMetrics.highestRevenue.toLocaleString()}`}
-                  icon={<Users className="h-5 w-5" />}
-                />
-              </div>
-
-              {/* Bubble Map */}
-              <div className="mb-6 sm:mb-8">
-                <BubbleMap data={regionalData} height={500} metric="revenue" />
-              </div>
-
-              {/* Regional Performance Table */}
-              <div className="overflow-x-auto w-full max-w-full">
-                <Table
-                  title={`Regional Performance Details (${regionalData.length} regions)`}
-                  showIndex={true}
-                  maxHeight="400px"
-                  columns={[
-                    {
-                      key: "region",
-                      header: "Region",
-                      width: "20%",
-                      sortable: true,
-                      sortType: "string",
-                      render: (value) => (
-                        <div className="font-medium text-white text-sm">
-                          {value}
-                        </div>
-                      ),
-                    },
-                    {
-                      key: "country",
-                      header: "Country",
-                      width: "15%",
-                      sortable: true,
-                      sortType: "string",
-                    },
-                    {
-                      key: "revenue",
-                      header: "Revenue",
-                      width: "15%",
-                      align: "right",
-                      sortable: true,
-                      sortType: "number",
-                      render: (value) => (
-                        <span className="text-green-400 font-medium text-sm">
-                          ${value.toLocaleString()}
-                        </span>
-                      ),
-                    },
-                    {
-                      key: "spend",
-                      header: "Spend",
-                      width: "15%",
-                      align: "right",
-                      sortable: true,
-                      sortType: "number",
-                      render: (value) => (
-                        <span className="text-yellow-400 font-medium text-sm">
-                          ${value.toLocaleString()}
-                        </span>
-                      ),
-                    },
-                    {
-                      key: "conversions",
-                      header: "Conversions",
-                      width: "12%",
-                      align: "right",
-                      sortable: true,
-                      sortType: "number",
-                      render: (value) => (
-                        <span className="text-blue-400 font-medium text-sm">
-                          {value.toLocaleString()}
-                        </span>
-                      ),
-                    },
-                    {
-                      key: "roas",
-                      header: "ROAS",
-                      width: "10%",
-                      align: "right",
-                      sortable: true,
-                      sortType: "number",
-                      render: (value) => (
-                        <span
-                          className={`font-medium text-sm ${
-                            value >= 2
+                <div className="space-y-4">
+                  {MOCK_REGIONAL_DATA.map((data) => (
+                    <div
+                      key={data.region}
+                      className="bg-gray-900 p-4 rounded-lg flex justify-between items-center transition-transform duration-300 hover:scale-[1.02] border border-gray-700"
+                    >
+                      <p className="text-lg font-semibold text-gray-100">
+                        {data.region}
+                      </p>
+                      <div className="text-right">
+                        <p
+                          className={`text-sm ${
+                            metric === "revenue"
                               ? "text-green-400"
-                              : value >= 1
-                              ? "text-yellow-400"
                               : "text-red-400"
                           }`}
                         >
-                          {value.toFixed(1)}x
-                        </span>
-                      ),
-                    },
-                    {
-                      key: "ctr",
-                      header: "CTR",
-                      width: "8%",
-                      align: "right",
-                      sortable: true,
-                      sortType: "number",
-                      render: (value) => (
-                        <span className="text-gray-300 text-sm">
-                          {value.toFixed(1)}%
-                        </span>
-                      ),
-                    },
-                  ]}
-                  defaultSort={{ key: "revenue", direction: "desc" }}
-                  data={regionalData}
-                  emptyMessage="No regional data available"
-                />
+                          {metric === "revenue" ? "Revenue:" : "Spend:"}
+                        </p>
+                        <p className="text-xl font-bold text-white">
+                          ${data[metric].toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </>
-          )}
+            </div>
+          </div>
         </div>
 
         <Footer />
